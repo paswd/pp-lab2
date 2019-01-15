@@ -68,6 +68,10 @@ private:
 
 	double *SendBuffer;
 	double *GetBuffer;
+	size_t BufferParametersArrLength;
+	int *BufferCounts;
+	int *BufferDispls;
+
 	size_t BufferSize;
 	MPI_Status Status;
 
@@ -139,7 +143,7 @@ private:
 		BufferSize = SizeX * SizeY;
 	}
 
-	void copyLayerToBuffer(double *buffer, size_t layerId) {
+	void copyOneLayerToBuffer(double *buffer, size_t layerId) {
 		for (size_t i = 0; i < SizeX; i++) {
 			for (size_t j = 0; j < SizeY; j++) {
 				buffer[(i * SizeX) + j] = Func[i][j][layerId];
@@ -147,11 +151,41 @@ private:
 		}
 	}
 
-	void getLayerFromBuffer(double *buffer, size_t layerId) {
+	void getOneLayerFromBuffer(double *buffer, size_t layerId) {
 		for (size_t i = 0; i < SizeX; i++) {
 			for (size_t j = 0; j < SizeY; j++) {
 				Func[i][j][layerId] = buffer[(i * SizeX) + j];
+				//cout << Func[i][j][layerId] << " ";
 			}
+			//cout << endl;
+		}
+		//cout << endl;
+	}
+
+	double *getBufferElement(double *buffer, size_t pos) {
+		size_t layerSize = SizeX * SizeY;
+		return &(buffer[pos * layerSize]);
+	}
+
+	void copyLayersToBuffer(double *buffer) {
+		if (!isFirstMachine()) {
+			double *bufferElementPrev = getBufferElement(buffer, MachineId - 1);
+			copyOneLayerToBuffer(bufferElementPrev, 1);
+		}
+		if (!isLastMachine()) {
+			double *bufferElementNext = getBufferElement(buffer, MachineId + 1);
+			copyOneLayerToBuffer(bufferElementNext, MachinesCnt - 2);
+		}
+	}
+
+	void getLayersFromBuffer(double *buffer) {
+		if (!isFirstMachine()) {
+			double *bufferElementPrev = getBufferElement(buffer, MachineId - 1);
+			getOneLayerFromBuffer(bufferElementPrev, 0);
+		}
+		if (!isLastMachine()) {
+			double *bufferElementNext = getBufferElement(buffer, MachineId + 1);
+			getOneLayerFromBuffer(bufferElementNext, MachinesCnt - 1);
 		}
 	}
 
@@ -186,6 +220,17 @@ private:
 
 		SendBuffer = new double[BufferSize];
 		GetBuffer = new double[BufferSize];
+
+		BufferCounts = new int[BufferParametersArrLength];
+		BufferDispls = new int[BufferParametersArrLength];
+
+		size_t layerSize = SizeX * SizeY;
+		size_t currentDispl = 0;
+		for (size_t i = 0; i < BufferParametersArrLength; i++) {
+			BufferCounts[i] = layerSize;
+			BufferDispls[i] = currentDispl;
+			currentDispl += layerSize;
+		}
 	}
 
 	void arrClear() {
@@ -207,6 +252,9 @@ private:
 
 		delete [] SendBuffer;
 		delete [] GetBuffer;
+
+		delete [] BufferCounts;
+		delete [] BufferDispls;
 	}
 
 	double getElementNewValue(size_t i, size_t j, size_t k) {
@@ -223,11 +271,47 @@ private:
 			);
 	}
 
+	/*void setBufferPosEmpty(double *buffer, size_t pos) {
+		size_t layerSize = SizeX * SizeY;
+		double *bufferElement = buffer + (layerSize * pos);
+
+		for (size_t i = 0; i < layerSize; i++) {
+			bufferElement[i] = 0.;
+		}
+	}*/
+
+	/*void exchangeLayerPrev() {
+		if (MachineId > 0) {
+			copyLayersToBuffer(SendBuffer);
+			MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER,
+				GetBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
+			getLayersFromBuffer(GetBuffer);
+		}
+	}
+
+	void exchangeLayerNext() {
+		if (MachineId < MachinesCnt - 1) {
+			copyLayersToBuffer(SendBuffer);
+			MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER,
+				GetBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
+			getLayersFromBuffer(GetBuffer);
+		}
+	}*/
+
+	void machineExchange() {
+		copyLayersToBuffer(SendBuffer);
+		MPI_Alltoallv(SendBuffer, BufferCounts, BufferDispls, MPI_DOUBLE,
+			GetBuffer, BufferCounts, BufferDispls, MPI_DOUBLE, MPI_COMM_WORLD);
+		getLayersFromBuffer(GetBuffer);
+	}
+
 public:
 	Puasson3dSolver(string filename, size_t machinesCnt, size_t machineId) {
 		initDefaultVars();
 		getDataFromFile(filename);
+		BufferParametersArrLength = machinesCnt;
 		setClusterParams(min(machinesCnt, SizeZ), machineId);
+		BufferSize *= BufferParametersArrLength;
 		arrInit();
 	}
 	~Puasson3dSolver() {
@@ -240,21 +324,9 @@ public:
 		size_t untillZ = LayersOnMachine - 1;
 
 		for (size_t iteration = 0; iteration < IterCnt; iteration++) {
-			//Exchange data with previous layer
-			if (MachineId > 0) {
-				copyLayerToBuffer(SendBuffer, 1);
-				MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER,
-					GetBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
-				getLayerFromBuffer(GetBuffer, 0);
-			}
-
-			//Exchange data with next layer
-			if (MachineId < MachinesCnt - 1) {
-				copyLayerToBuffer(SendBuffer, MachinesCnt - 2);
-				MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER,
-					GetBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
-				getLayerFromBuffer(GetBuffer, MachinesCnt - 1);
-			}
+			//exchangeLayerPrev();
+			//exchangeLayerNext();
+			machineExchange();
 
 			for (size_t i = 1; i < untillX; i++) {
 				for (size_t j = 1; j < untillY; j++) {
