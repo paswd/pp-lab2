@@ -49,7 +49,7 @@ private:
 	size_t SizeY;
 	size_t SizeZ;
 
-	//size_t IterCnt;
+	size_t IterCnt;
 	double Eps;
 	double Coeff;
 
@@ -349,6 +349,7 @@ public:
 		size_t untillY = SizeY - 1;
 		size_t untillZ = LayersOnMachine - 1;
 		double currEps = Eps * 2;
+		IterCnt = 0;
 
 		while (currEps > Eps) {
 			machineExchange();
@@ -365,6 +366,7 @@ public:
 			double ***tmp = Func;
 			Func = NewFunc;
 			NewFunc = tmp;
+			IterCnt++;
 		}
 	}
 
@@ -374,7 +376,8 @@ public:
 				if (MachineId == 0) {
 					out << "Solution for " << SizeX << "x" << SizeY << "x" << SizeZ << endl;
 					out << "Alpha = " << Coeff << endl;
-					out << "Eps: " << Eps << endl << endl;
+					out << "Eps: " << Eps << endl;
+					out << "Iterations count: " << IterCnt << endl << endl;
 				}
 				for (size_t k = 0; k < LayersOnMachine; k++) {
 					if (k == 0 && !isFirstMachine()) {
