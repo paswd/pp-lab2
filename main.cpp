@@ -49,7 +49,8 @@ private:
 	size_t SizeY;
 	size_t SizeZ;
 
-	size_t IterCnt;
+	//size_t IterCnt;
+	double Eps;
 	double Coeff;
 
 	//Math variables
@@ -68,13 +69,23 @@ private:
 
 	double *SendBuffer;
 	double *GetBuffer;
-	size_t BufferParametersArrLength;
+	size_t ExistingMachinesCnt;
 	int *BufferCounts;
 	int *BufferDispls;
+
+	double *EpsBuffer;
+	int *EpsBufferCounts;
+	int *EpsBufferDispls;
 
 	size_t BufferSize;
 	MPI_Status Status;
 
+public:
+	bool isUnclaimed() {
+		return MachineId >= MachinesCnt;
+	}
+
+private:
 	void initDefaultVars() {
 		StepSqX = 1.;
 		StepSqY = 1.;
@@ -138,7 +149,7 @@ private:
 	void getDataFromFile(string filename) {
 		ifstream in(filename.c_str());
 		in >> SizeX >> SizeY >> SizeZ >>
-			IterCnt >> Coeff;
+			Eps >> Coeff;
 		in.close();
 		BufferSize = SizeX * SizeY;
 	}
@@ -155,11 +166,8 @@ private:
 		for (size_t i = 0; i < SizeX; i++) {
 			for (size_t j = 0; j < SizeY; j++) {
 				Func[i][j][layerId] = buffer[(i * SizeX) + j];
-				//cout << Func[i][j][layerId] << " ";
 			}
-			//cout << endl;
 		}
-		//cout << endl;
 	}
 
 	double *getBufferElement(double *buffer, size_t pos) {
@@ -221,15 +229,27 @@ private:
 		SendBuffer = new double[BufferSize];
 		GetBuffer = new double[BufferSize];
 
-		BufferCounts = new int[BufferParametersArrLength];
-		BufferDispls = new int[BufferParametersArrLength];
+		BufferCounts = new int[ExistingMachinesCnt];
+		BufferDispls = new int[ExistingMachinesCnt];
 
 		size_t layerSize = SizeX * SizeY;
 		size_t currentDispl = 0;
-		for (size_t i = 0; i < BufferParametersArrLength; i++) {
-			BufferCounts[i] = layerSize;
-			BufferDispls[i] = currentDispl;
+
+		for (size_t i = 0; i < ExistingMachinesCnt; i++) {
+			BufferCounts[i] = (int) layerSize;
+			BufferDispls[i] = (int) currentDispl;
 			currentDispl += layerSize;
+		}
+
+		EpsBuffer = new double[ExistingMachinesCnt];
+		EpsBufferCounts = new int[ExistingMachinesCnt];
+		EpsBufferDispls = new int[ExistingMachinesCnt];
+		currentDispl = 0;
+
+		for (size_t i = 0; i < ExistingMachinesCnt; i++) {
+			EpsBufferCounts[i] = 1;
+			EpsBufferDispls[i] = currentDispl;
+			currentDispl++;
 		}
 	}
 
@@ -271,33 +291,6 @@ private:
 			);
 	}
 
-	/*void setBufferPosEmpty(double *buffer, size_t pos) {
-		size_t layerSize = SizeX * SizeY;
-		double *bufferElement = buffer + (layerSize * pos);
-
-		for (size_t i = 0; i < layerSize; i++) {
-			bufferElement[i] = 0.;
-		}
-	}*/
-
-	/*void exchangeLayerPrev() {
-		if (MachineId > 0) {
-			copyLayersToBuffer(SendBuffer);
-			MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER,
-				GetBuffer, BufferSize, MPI_DOUBLE, MachineId - 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
-			getLayersFromBuffer(GetBuffer);
-		}
-	}
-
-	void exchangeLayerNext() {
-		if (MachineId < MachinesCnt - 1) {
-			copyLayersToBuffer(SendBuffer);
-			MPI_Sendrecv(SendBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER,
-				GetBuffer, BufferSize, MPI_DOUBLE, MachineId + 1, TAGS_LAYER, MPI_COMM_WORLD, &Status);
-			getLayersFromBuffer(GetBuffer);
-		}
-	}*/
-
 	void machineExchange() {
 		copyLayersToBuffer(SendBuffer);
 		MPI_Alltoallv(SendBuffer, BufferCounts, BufferDispls, MPI_DOUBLE,
@@ -305,13 +298,46 @@ private:
 		getLayersFromBuffer(GetBuffer);
 	}
 
+	double getCurrEps(double ***f1, double ***f2, size_t untillX, size_t untillY, size_t untillZ) {
+		double resEps = Eps;
+		if (isUnclaimed()) {
+			return 0.;
+		}
+		for (size_t i = 0; i < untillX; i++) {
+			for (size_t j = 0; j < untillY; j++) {
+				for (size_t k = 0; k < untillZ; k++) {
+					double currEps = abs(f1[i][j][k] - f2[i][j][k]);
+					if (i == 0 && j == 0 && k == 0) {
+						resEps = currEps;
+					} else {
+						resEps = max(resEps, currEps);
+					}
+				}
+			}
+		}
+		return resEps;
+	}
+	double getAllMachinesEps(double currEps) {
+		MPI_Allgatherv(&currEps, 1, MPI_DOUBLE, EpsBuffer, EpsBufferCounts, EpsBufferDispls,
+			MPI_DOUBLE, MPI_COMM_WORLD);
+		double maxEps = currEps;
+
+		for (size_t i = 0; i < ExistingMachinesCnt; i++) {
+			if (EpsBuffer[i] > maxEps) {
+				maxEps = EpsBuffer[i];
+			}
+		}
+
+		return maxEps;
+	}
+
 public:
 	Puasson3dSolver(string filename, size_t machinesCnt, size_t machineId) {
 		initDefaultVars();
 		getDataFromFile(filename);
-		BufferParametersArrLength = machinesCnt;
+		ExistingMachinesCnt = machinesCnt;
 		setClusterParams(min(machinesCnt, SizeZ), machineId);
-		BufferSize *= BufferParametersArrLength;
+		BufferSize *= ExistingMachinesCnt;
 		arrInit();
 	}
 	~Puasson3dSolver() {
@@ -322,10 +348,9 @@ public:
 		size_t untillX = SizeX - 1;
 		size_t untillY = SizeY - 1;
 		size_t untillZ = LayersOnMachine - 1;
+		double currEps = Eps * 2;
 
-		for (size_t iteration = 0; iteration < IterCnt; iteration++) {
-			//exchangeLayerPrev();
-			//exchangeLayerNext();
+		while (currEps > Eps) {
 			machineExchange();
 
 			for (size_t i = 1; i < untillX; i++) {
@@ -335,6 +360,8 @@ public:
 					}
 				}
 			}
+			currEps = getAllMachinesEps(getCurrEps(Func, NewFunc, untillX, untillY, untillZ));
+
 			double ***tmp = Func;
 			Func = NewFunc;
 			NewFunc = tmp;
@@ -347,7 +374,7 @@ public:
 				if (MachineId == 0) {
 					out << "Solution for " << SizeX << "x" << SizeY << "x" << SizeZ << endl;
 					out << "Alpha = " << Coeff << endl;
-					out << "Iterations count: " << IterCnt << endl << endl;
+					out << "Eps: " << Eps << endl << endl;
 				}
 				for (size_t k = 0; k < LayersOnMachine; k++) {
 					if (k == 0 && !isFirstMachine()) {
@@ -372,9 +399,6 @@ public:
 			}
 			MPI_Barrier(MPI_COMM_WORLD);
 		}
-	}
-	bool isUnclaimed() {
-		return MachineId >= MachinesCnt;
 	}
 };
 
